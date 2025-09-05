@@ -2,10 +2,10 @@
 defined('MOODLE_INTERNAL') || die();
 
 $capabilities = [
-    'local/coursebuilder:manage' => [
-        'captype'      => 'write',
+    'local/autocourses:manage' => [
+        'captype' => 'write',
         'contextlevel' => CONTEXT_SYSTEM,
-        'archetypes'   => [
+        'archetypes' => [
             'manager' => CAP_ALLOW
         ]
     ]
