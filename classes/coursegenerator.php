@@ -1,108 +1,134 @@
 <?php
+namespace local_autocourses;
+
 defined('MOODLE_INTERNAL') || die();
+define('COURSE_FULLNAME_MAXLEN', 80);
+define('COURSE_SHORTNAME_MAXLENGTH', 20);
 
-class local_autocourses_coursegenerator {
+class coursegenerator {
 
-    
-    public static function find_course_by_shortname(string $shortname) {
+    public static function create_courses(array $tree) {
         global $DB;
-        $shortname = trim($shortname);
-        if ($shortname === '') { return null; }
-        return $DB->get_record('course', ['shortname' => $shortname], '*', IGNORE_MISSING) ?: null;
+
+        foreach ($tree as $faculty => $codespecs) {
+            $facultycatid = self::ensure_category($faculty, 0);
+
+            if (!is_array($codespecs)) {
+                continue;
+            }
+
+            foreach ($codespecs as $codespec => $groups) {
+                $specid = self::ensure_category($codespec, $facultycatid);
+
+                if (!is_array($groups)) {
+                    continue;
+                }
+
+                foreach ($groups as $group => $info) {
+                    $groupcatid = self::ensure_category($group, $specid);
+
+                    if (isset($info['semesters']) && is_array($info['semesters'])) {
+                        foreach ($info['semesters'] as $semester => $disciplines) {
+                            $semcatid = self::ensure_category("Семестр {$semester}", $groupcatid);
+
+                            foreach ($disciplines as $discipline) {
+                                $fullname  = mb_substr($discipline['name'], 0, COURSE_FULLNAME_MAXLEN);
+                                $shortname = self::generate_shortname($discipline['name'], $group, $semester);
+
+                                self::ensure_course($fullname, $semcatid, $shortname, $discipline);
+                            }
+                        }
+                    } elseif (isset($info[0]) && is_array($info[0])) {
+                        foreach ($info as $discipline) {
+                            $fullname  = mb_substr($discipline['name'], 0, COURSE_FULLNAME_MAXLEN);
+                            $shortname = self::generate_shortname($discipline['name'], $group, $semester);
+
+                            if ($DB->record_exists('course', ['shortname' => $shortname])) {
+                                mtrace("Курс '{$shortname}' уже существует, пропускаем создание.");
+                                continue;
+                            }
+                            self::ensure_course($fullname, $groupcatid, $shortname, $discipline);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    
-    public static function create_course(array $data, int $categoryid, bool $dryrun = false): int {
-        // $data ожидает: fullname, shortname, summary, numsections, format
-        if ($dryrun) {
-            local_autocourses_helper::log('INFO', "DRYRUN create course {$data['shortname']} in category {$categoryid}");
+    protected static function ensure_category(string $name, int $parentid): int {
+        global $DB;
+
+        if ($cat = $DB->get_record('course_categories', ['name' => $name, 'parent' => $parentid])) {
+            return $cat->id;
+        }
+
+        $newcat = new \stdClass();
+        $newcat->name   = $name;
+        $newcat->parent = $parentid;
+        $newcat->id     = $DB->insert_record('course_categories', $newcat);
+
+        return $newcat->id;
+    }
+
+    protected static function ensure_course(
+        string $fullname,
+        int $categoryid,
+        string $shortname,
+        array $discipline = []
+    ): int {
+        global $DB, $CFG;
+
+        require_once($CFG->dirroot.'/course/lib.php');
+
+        if ($DB->record_exists('course', ['shortname' => $shortname])) {
+            mtrace("Пропущен: {$fullname} / {$shortname} (уже существует в БД)");
             return 0;
         }
 
-        $new = new stdClass();
-        $new->category = $categoryid;
-        $new->fullname = $data['fullname'];
-        $new->shortname = $data['shortname'];
-        $new->summary = $data['summary'] ?? '';
-        $new->numsections = (int)($data['numsections'] ?? 10);
-        $new->visible = 1;
-        $new->format = $data['format'] ?? 'topics';
+        $newcourse = new \stdClass();
+        $newcourse->fullname   = $fullname;
+        $newcourse->shortname  = $shortname;
+        $newcourse->category   = $categoryid;
 
-        $course = create_course($new);
-        local_autocourses_helper::log('INFO', "Created course {$course->shortname} id {$course->id} in category {$categoryid}");
-        return (int)$course->id;
+        if (!empty($discipline)) {
+            $credits = $discipline['credits'] ?? '';
+            $hours   = $discipline['hours'] ?? '';
+            $types   = !empty($discipline['types']) ? implode(', ', $discipline['types']) : '';
+            $newcourse->summary = trim("{$credits} кредита, {$hours} часов, форма контроля: {$types}");
+            $newcourse->summaryformat = FORMAT_HTML;
+        }
+
+        try {
+            $course = create_course($newcourse);
+            mtrace("Создан: id={$course->id}, fullname='{$fullname}', shortname='{$shortname}'");
+            return $course->id;
+        } catch (\Throwable $e) {
+            mtrace("Ошибка: fullname='{$fullname}', shortname='{$shortname}' — {$e->getMessage()}");
+            return 0;
+        }
     }
 
-    
-    public static function update_course(int $courseid, array $data, int $categoryid, bool $dryrun = false): int {
+    protected static function generate_shortname(string $discipline, string $group, int $semester): string {
         global $DB;
-        $existing = $DB->get_record('course', ['id' => $courseid], '*', MUST_EXIST);
 
-        $upd = new stdClass();
-        $upd->id = $existing->id;
-        $upd->fullname = $data['fullname'] ?? $existing->fullname;
-        $upd->summary = $data['summary'] ?? $existing->summary;
-        $upd->category = $categoryid;
-        $upd->numsections = (int)($data['numsections'] ?? $existing->numsections);
+        // Аббревиатура дисциплины: первые буквы слов
+        $words = preg_split('/\s+/u', trim($discipline));
+        $abbr  = implode('', array_map(fn($w) => mb_substr($w, 0, 1, 'UTF-8'), $words));
+        $abbr  = mb_strtoupper($abbr, 'UTF-8');
 
-        if ($dryrun) {
-            local_autocourses_helper::log('INFO', "DRYRUN update course {$existing->shortname} id {$existing->id} in category {$categoryid}");
-            return $existing->id;
+        // Базовый shortname: группа + аббревиатура + семестр
+        $base = preg_replace('/[^A-Za-zА-Яа-я0-9_-]/u', '_', "{$group}_{$abbr}_{$semester}");
+        $base = mb_substr($base, 0, COURSE_SHORTNAME_MAXLENGTH, 'UTF-8');
+
+        // Уникальность
+        $shortname = $base;
+        $i = 1;
+        while ($DB->record_exists('course', ['shortname' => $shortname])) {
+            $suffix = "_{$i}";
+            $shortname = mb_substr($base, 0, COURSE_SHORTNAME_MAXLENGTH - mb_strlen($suffix, 'UTF-8'), 'UTF-8') . $suffix;
+            $i++;
         }
 
-        $DB->update_record('course', $upd);
-        local_autocourses_helper::log('INFO', "Updated course {$existing->shortname} id {$existing->id} in category {$categoryid}");
-        return (int)$existing->id;
-    }
-
-    
-    public static function ensure_course_from_plan(array $plan, int $categoryid, bool $dryrun = false): int {
-        // Нормализация входа
-        $code = trim($plan['code'] ?? '');
-        $name = trim($plan['name'] ?? ($plan['fullname'] ?? 'Unnamed course'));
-        $semester = isset($plan['semester']) ? intval($plan['semester']) : 0;
-
-        // fullname шаблон
-        $fullname = $code !== '' ? "{$code} — {$name}" : $name;
-        if ($semester > 0) {
-            $fullname .= " (сем. {$semester})";
-        }
-
-        // shortname: предпочитаем код, иначе deterministic hash
-        if ($code !== '') {
-            $short = preg_replace('/\s+/', '', mb_strtoupper($code, 'UTF-8'));
-        } else {
-            $short = 'AC-' . strtoupper(substr(md5($name), 0, 6));
-        }
-
-        // Убедиться в уникальности shortname: если уже занят другим course и fullname не совпадает — расширить
-        $existing = self::find_course_by_shortname($short);
-        if ($existing && $existing->fullname !== $fullname) {
-            // добавляем суффикс семестра или хэш, чтобы избежать конфликта
-            $suffix = $semester ? "-S{$semester}" : "-" . substr(md5($name), 0,4);
-            $short = $short . $suffix;
-        }
-
-        // summary: добавим семестр и источник
-        $summaryParts = [];
-        if (!empty($plan['summary'])) { $summaryParts[] = $plan['summary']; }
-        if ($semester > 0) { $summaryParts[] = "Semester: {$semester}"; }
-        if (!empty($plan['source'])) { $summaryParts[] = "Source: " . $plan['source']; }
-        $summary = implode("\n", $summaryParts);
-
-        $data = [
-            'fullname' => $fullname,
-            'shortname' => $short,
-            'summary' => $summary,
-            'numsections' => (int)($plan['numsections'] ?? 10),
-            'format' => $plan['format'] ?? 'topics'
-        ];
-
-        if ($existing) {
-            // Если найден курс с тем же shortname — обновляем
-            return self::update_course((int)$existing->id, $data, $categoryid, $dryrun);
-        } else {
-            return self::create_course($data, $categoryid, $dryrun);
-        }
+        return $shortname;
     }
 }

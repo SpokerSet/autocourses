@@ -1,162 +1,187 @@
 <?php
-// local/autocourses/index.php
-require_once(__DIR__ . '/../../config.php');
-defined('MOODLE_INTERNAL') || die();
-
-use local_autocourses\planprovider;
-use local_autocourses\coursegenerator;
+namespace local_autocourses;
+require_once(__DIR__.'/../../config.php');
+require_once($CFG->libdir.'/adminlib.php');
+require_once($CFG->dirroot.'/course/lib.php');
 
 require_login();
-$context = context_system::instance();
-require_capability('local/autocourses:manage', $context);
+admin_externalpage_setup('local_autocourses_index');
 
-$PAGE->set_context($context);
-$PAGE->set_url(new moodle_url('/local/autocourses/index.php'));
-$PAGE->set_title(get_string('pluginname', 'local_autocourses'));
-$PAGE->set_heading(get_string('pluginname', 'local_autocourses'));
+$PAGE->set_title('Управление курсами');
+$PAGE->set_heading('Управление курсами');
 
 echo $OUTPUT->header();
+echo $OUTPUT->heading('Операции с курсами');
 
-// Параметры
-$group = optional_param('group', '', PARAM_RAW_TRIMMED);
-$spec  = optional_param('spec', '', PARAM_RAW_TRIMMED);
-$year  = optional_param('year', '', PARAM_RAW_TRIMMED);
-$mode  = optional_param('mode', '', PARAM_ALPHANUMEXT); // 'all' для полного прохода по всем специальностям
-
-$create_courses_from_plans = function(array $plans, string $source) {
-    global $OUTPUT;
-    if (empty($plans)) {
-        echo $OUTPUT->notification("Нет планов для обработки (источник: {$source})", 'notifymessage');
-        return;
+// === Удаление по дисциплине ===
+if (!empty($_POST['purge']) && !empty($_POST['pattern'])) {
+    $pattern = trim($_POST['pattern']);
+    if (!empty($_POST['strict'])) {
+        $sql = "SELECT id, fullname FROM {course} WHERE fullname = ?";
+        $courses = $DB->get_records_sql($sql, [$pattern]);
+    } else {
+        $sql = "SELECT id, fullname FROM {course} WHERE fullname LIKE ?";
+        $courses = $DB->get_records_sql($sql, ["%{$DB->sql_like_escape($pattern)}%"]);
     }
-    foreach ($plans as $plan) {
-        try {
-            $courseid = coursegenerator::create_course_from_plan($plan);
-            echo html_writer::tag('div', "✅ Курс " . s($plan['fullname']) . " создан (ID: {$courseid}) — источник: {$source}");
-        } catch (Exception $e) {
-            echo html_writer::tag('div', "⚠️ Ошибка при создании курса " . s($plan['fullname']) . ": " . s($e->getMessage()), array('class' => 'notifyproblem'));
+
+    echo "<div style='border:1px solid #ccc;padding:10px;margin-top:10px;'>";
+    echo "<strong>Найдено ".count($courses)." курсов по запросу '{$pattern}':</strong><br>";
+
+    if (!empty($_POST['dryrun'])) {
+        foreach ($courses as $c) {
+            echo "<div style='color:blue'>Будет удалён: ".s($c->fullname)." (id {$c->id})</div>";
+        }
+    } else {
+        foreach ($courses as $c) {
+            delete_course($c->id, false);
+            echo "<div style='color:red'>Удалён: ".s($c->fullname)." (id {$c->id})</div>";
         }
     }
-};
+    echo "</div>";
+}
 
-// Режим: конкретная группа
-if ($group !== '') {
-    try {
-        if (!preg_match('/^\d{2}[-].+$/u', $group)) {
-            throw new Exception("Неверный формат группы: " . $group . ". Ожидается формат '25-XXX'.");
-        }
-        $plans = planprovider::fetch_plans_for_group($group);
-        $create_courses_from_plans($plans, "group {$group}");
-    } catch (Exception $e) {
-        try {
-            $plans = planprovider::get_cached_plans_for_group($group);
-            if (!empty($plans)) {
-                echo $OUTPUT->notification('Ошибка получения актуальных планов: ' . s($e->getMessage()) . '. Использую кеш.', 'notifywarning');
-                $create_courses_from_plans($plans, "cached group {$group}");
+// === Удаление дублей по fullname (глобально) ===
+if (!empty($_POST['dedupe_global'])) {
+    $sql = "SELECT id, fullname FROM {course} ORDER BY fullname, id";
+    $courses = $DB->get_records_sql($sql);
+
+    $seen = [];
+    $deleted = 0;
+
+    echo "<div style='border:1px solid #ccc;padding:10px;margin-top:10px;'>";
+    foreach ($courses as $c) {
+        $key = trim($c->fullname);
+        if (isset($seen[$key])) {
+            if (!empty($_POST['dryrun'])) {
+                echo "<div style='color:blue'>Будет удалён дубликат: ".s($c->fullname)." (id {$c->id})</div>";
             } else {
-                echo $OUTPUT->notification('Ошибка получения планов для группы: ' . s($e->getMessage()), 'notifyproblem');
+                delete_course($c->id, false);
+                echo "<div style='color:red'>Удалён дубликат: ".s($c->fullname)." (id {$c->id})</div>";
+                $deleted++;
             }
-        } catch (Exception $ignored) {
-            echo $OUTPUT->notification('Ошибка при попытке использовать кеш: ' . s($ignored->getMessage()), 'notifyproblem');
+        } else {
+            $seen[$key] = $c->id;
         }
     }
-
-    echo $OUTPUT->footer();
-    exit;
+    echo "<p><strong>Удалено дублей по дереву: {$deleted}</strong></p>";
+    echo "</div>";
 }
 
-// Режим: одна специальность
-if ($spec !== '') {
-    try {
-        $yearprefix = $year ?: get_config('local_autocourses', 'default_yearprefix') ?: '25';
-        if (!preg_match('/^\d{2}$/', $yearprefix)) {
-            throw new Exception('Неверный префикс года: ' . $yearprefix);
-        }
+// === Удаление дублей внутри семестров ===
+if (!empty($_POST['dedupe_semester'])) {
+    $sql = "SELECT c.id, c.fullname, cat.name AS categoryname
+            FROM {course} c
+            JOIN {course_categories} cat ON cat.id = c.category
+            WHERE cat.name LIKE 'Семестр %'
+            ORDER BY cat.id, c.fullname, c.id";
+    $courses = $DB->get_records_sql($sql);
 
-        $groups = planprovider::get_groups_for_specialty($spec, $yearprefix);
-        if (empty($groups)) {
-            throw new Exception('По специальности не найдено ни одной группы.');
-        }
+    $seen = [];
+    $deleted = 0;
 
-        foreach ($groups as $g) {
-            try {
-                $plans = planprovider::fetch_plans_for_group($g);
-                $create_courses_from_plans($plans, "spec {$spec} -> group {$g}");
-            } catch (Exception $e) {
-                $cached = planprovider::get_cached_plans_for_group($g);
-                if (!empty($cached)) {
-                    echo $OUTPUT->notification('Ошибка получения планов для ' . s($g) . ': ' . s($e->getMessage()) . '. Использую кеш.', 'notifywarning');
-                    $create_courses_from_plans($cached, "cached group {$g}");
-                } else {
-                    echo $OUTPUT->notification('Ошибка для группы ' . s($g) . ': ' . s($e->getMessage()), 'notifyproblem');
-                }
+    echo "<div style='border:1px solid #ccc;padding:10px;margin-top:10px;'>";
+    foreach ($courses as $c) {
+        $key = $c->categoryname . '|' . trim($c->fullname);
+        if (isset($seen[$key])) {
+            if (!empty($_POST['dryrun'])) {
+                echo "<div style='color:blue'>Будет удалён дубликат: ".s($c->fullname)." (id {$c->id}) в {$c->categoryname}</div>";
+            } else {
+                delete_course($c->id, false);
+                echo "<div style='color:red'>Удалён дубликат: ".s($c->fullname)." (id {$c->id}) в {$c->categoryname}</div>";
+                $deleted++;
             }
+        } else {
+            $seen[$key] = $c->id;
         }
-    } catch (Exception $e) {
-        echo $OUTPUT->notification('Ошибка получения групп по специальности: ' . s($e->getMessage()), 'notifyproblem');
     }
-
-    echo $OUTPUT->footer();
-    exit;
+    echo "<p><strong>Удалено дублей внутри семестров: {$deleted}</strong></p>";
+    echo "</div>";
 }
 
-// Режим: полный проход по всем специальностям (mode=all)
-if ($mode === 'all') {
-    $yearprefix = $year ?: get_config('local_autocourses', 'default_yearprefix') ?: '25';
-    if (!preg_match('/^\d{2}$/', $yearprefix)) {
-        echo $OUTPUT->notification('Неверный префикс года: ' . s($yearprefix), 'notifyproblem');
-        echo $OUTPUT->footer();
-        exit;
+// === Формы управления ===
+echo "<form method='post' style='margin-top:20px;'>";
+echo "<h3>Удаление по дисциплине</h3>";
+echo "<label>Название дисциплины: <input type='text' name='pattern' style='width:300px;'></label><br><br>";
+echo "<label><input type='checkbox' name='strict' value='1'> Строгое совпадение</label><br>";
+echo "<label><input type='checkbox' name='dryrun' value='1'> Только показать (dry‑run)</label><br><br>";
+echo "<input type='submit' name='purge' value='Выполнить'>";
+echo "</form>";
+
+echo "<form method='post' style='margin-top:20px;'>";
+echo "<h3>Удаление дублей по fullname (глобально)</h3>";
+echo "<label><input type='checkbox' name='dryrun' value='1'> Только показать (dry‑run)</label><br><br>";
+echo "<input type='submit' name='dedupe_global' value='Удалить глобальные дубликаты'>";
+echo "</form>";
+
+echo "<form method='post' style='margin-top:20px;'>";
+echo "<h3>Удаление дублей внутри семестров</h3>";
+echo "<label><input type='checkbox' name='dryrun' value='1'> Только показать (dry‑run)</label><br><br>";
+echo "<input type='submit' name='dedupe_semester' value='Удалить дубликаты в семестрах'>";
+echo "</form>";
+
+echo "<form method='get' action='{$CFG->wwwroot}/local/autocourses/fullimport.php' style='margin-top:20px;'>";
+echo "<h3>Автоимпорт курсов</h3>";
+echo "<label>Учебный год: <input type='text' name='year' value='2025-2026' style='width:200px;'></label><br>";
+echo "<label>Offset: <input type='number' name='offset' value='0' style='width:100px;'></label><br>";
+echo "<label>Limit: <input type='number' name='limit' value='100' style='width:100px;'></label><br>";
+echo "<label>Refresh (сек): <input type='number' name='refresh' value='5' style='width:100px;'></label><br><br>";
+echo "<input type='submit' value='Запустить автоимпорт'>";
+echo "</form>";
+
+echo "<form method='get' action='{$CFG->wwwroot}/local/autocourses/dryrun.php' style='margin-top:20px;'>";
+echo "<h3>Dry‑run: структура курсов</h3>";
+echo "<label>Учебный год: <input type='text' name='year' value='2025-2026' style='width:200px;'></label><br><br>";
+echo "<input type='submit' value='Показать статистику'>";
+echo "</form>";
+
+
+// === Отчёт по заполненности курсов ===
+echo $OUTPUT->heading('Статистика заполненности курсов');
+
+if ($DB->get_manager()->table_exists('local_autocourses_fillstats')) {
+    $courses = $DB->get_records('local_autocourses_fillstats', null, 'percent DESC');
+
+    $table = new \html_table();
+    $table->head = ['ID курса', 'Название', 'Элементов', 'Заполненность'];
+
+    foreach ($courses as $c) {
+        $course = $DB->get_record('course', ['id' => $c->courseid], 'id, fullname');
+
+        // Цвет прогресс-бара
+        $color = ($c->percent < 30) ? 'red' : (($c->percent < 70) ? 'orange' : 'green');
+        $bar = \html_writer::div(
+            \html_writer::div('', 'bar-fill', [
+                'style' => "width:{$c->percent}%;background-color:{$color};height:100%;"
+            ]),
+            'bar-container',
+            ['style' => 'width:150px;border:1px solid #ccc;height:15px;display:inline-block;margin-right:5px;']
+        );
+
+        $row = [
+            $course->id,
+            format_string($course->fullname),
+            $c->total,
+            $bar . " {$c->percent}%"
+        ];
+        $table->data[] = $row;
     }
 
-    try {
-        $specialties = planprovider::fetch_all_specialties();
-    } catch (Exception $e) {
-        echo $OUTPUT->notification('Ошибка получения списка специальностей: ' . s($e->getMessage()), 'notifyproblem');
-        echo $OUTPUT->footer();
-        exit;
-    }
+    echo \html_writer::table($table);
 
-    foreach ($specialties as $specrecord) {
-        $group = planprovider::get_group_from_specialty_record($specrecord, $yearprefix);
-        if ($group === null) {
-            echo html_writer::tag('div', "Пропущена специальность " . s($specrecord['id'] ?? 'unknown') . " — нет grp");
-            continue;
-        }
+    // Сводная статистика
+    $low = $DB->count_records_select('local_autocourses_fillstats', 'percent < 30');
+    $mid = $DB->count_records_select('local_autocourses_fillstats', 'percent >= 30 AND percent < 70');
+    $high = $DB->count_records_select('local_autocourses_fillstats', 'percent >= 70');
 
-        try {
-            $plans = planprovider::fetch_plans_for_group($group);
-            $create_courses_from_plans($plans, "all-spec -> group {$group}");
-        } catch (Exception $e) {
-            echo html_writer::tag('div', "Ошибка получения планов для " . s($group) . ": " . s($e->getMessage()), array('class' => 'notifywarning'));
-            $cached = planprovider::get_cached_plans_for_group($group);
-            if (!empty($cached)) {
-                echo $OUTPUT->notification('Использую кеш для ' . s($group), 'notifymessage');
-                $create_courses_from_plans($cached, "cached group {$group}");
-            }
-        }
-        
-        usleep(100000);
-    }
+    echo \html_writer::tag('h3', 'Распределение курсов по заполненности');
+    echo \html_writer::tag('p', "Менее 30%: {$low} курсов");
+    echo \html_writer::tag('p', "30–70%: {$mid} курсов");
+    echo \html_writer::tag('p', "Более 70%: {$high} курсов");
 
-    echo $OUTPUT->footer();
-    exit;
+} else {
+    echo $OUTPUT->notification('Таблица статистики не найдена. Запустите cron для пересчёта.', 'notifyproblem');
 }
 
-// UI: форма запуска
-$formurl = new moodle_url('/local/autocourses/index.php');
-echo html_writer::start_tag('form', array('method' => 'get', 'action' => $formurl->out(false)));
-echo html_writer::tag('div', get_string('runbygroup', 'local_autocourses'));
-echo html_writer::empty_tag('input', array('type' => 'text', 'name' => 'group', 'placeholder' => '25-ГРП', 'value' => ''));
-echo html_writer::empty_tag('br');
-echo html_writer::tag('div', get_string('runbyspec', 'local_autocourses'));
-echo html_writer::empty_tag('input', array('type' => 'text', 'name' => 'spec', 'placeholder' => 'spec id', 'value' => ''));
-echo html_writer::empty_tag('input', array('type' => 'text', 'name' => 'year', 'placeholder' => '25 (optional)', 'value' => ''));
-echo html_writer::empty_tag('br');
-echo html_writer::empty_tag('input', array('type' => 'submit', 'value' => get_string('run', 'local_autocourses')));
-echo html_writer::end_tag('form');
 
-// Кнопка полного прохода
-$allurl = new moodle_url('/local/autocourses/index.php', ['mode' => 'all']);
-echo html_writer::tag('div', html_writer::link($allurl, get_string('runall', 'local_autocourses')));
+
 echo $OUTPUT->footer();

@@ -1,7 +1,7 @@
 <?php
 defined('MOODLE_INTERNAL') || die();
 
-class local_autocourses_helper {
+class helper {
 
     public static function log(string $level, string $message): void {
         $logdir = __DIR__ . '/../logs';

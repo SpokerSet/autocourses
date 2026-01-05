@@ -10,3 +10,5 @@ $string['api_baseurl'] = 'Plans API base URL';
 $string['api_baseurl_desc'] = 'Base URL to fetch plans for group';
 $string['default_yearprefix'] = 'Default year prefix';
 $string['default_yearprefix_desc'] = 'Two digit year prefix used when forming group names, e.g. 25';
+$string['queue_status'] = 'Статус очереди импорта курсов';
+$string['importsemesterstask'] = 'Фоновый импорт семестровых групп';

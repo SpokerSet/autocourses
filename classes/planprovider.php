@@ -4,207 +4,94 @@ namespace local_autocourses;
 defined('MOODLE_INTERNAL') || die();
 
 class planprovider {
+    public static function normalize(array $rows): array {
+        $tree = [];
 
-    /**
-     * Получить планы для конкретной группы (внешний API).
-     *
-     * @param string $group Формат: "25-ГРП" или аналогичный
-     * @return array
-     * @throws \Exception
-     */
-    public static function fetch_plans_for_group(string $group): array {
-        // Базовый URL для получения планов
-        $baseurl = get_config('local_autocourses', 'api_baseurl') ?: 'http://localhost:32123/education-plans/moodle-diciplians';
-        $url = $baseurl . '?group=' . urlencode($group);
+        foreach ($rows as $row) {
+            $faculty = $row['Faculty'];
+            $code    = $row['SpecialityCode'];
+            $spec    = $row['Speciality'];
+            $group   = $row['Group'];
+            $plan    = $row['Plan'];
+            $uplan   = $row['uplan'];
+            $codeSpec = $code . ' ' . $spec;
 
-        // кеш директория и файл
-        $cachedir = __DIR__ . '/../cache';
-        if (!is_dir($cachedir) && !mkdir($cachedir, 0755, true) && !is_dir($cachedir)) {
-            throw new \Exception('Не удалось создать каталог кеша: ' . $cachedir);
-        }
-        $safegroup = preg_replace('/[^a-zA-Z0-9_\-]/u', '_', $group);
-        $cachefile = $cachedir . "/group_{$safegroup}.json";
-
-        // cURL запрос
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-        $response = curl_exec($ch);
-        $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlerr = curl_errno($ch) ? curl_error($ch) : '';
-        curl_close($ch);
-
-        if ($response === false || $httpcode < 200 || $httpcode >= 300) {
-            // попытка использовать кеш
-            if (file_exists($cachefile)) {
-                $response = file_get_contents($cachefile);
-            } else {
-                throw new \Exception('Ошибка запроса к API планов: ' . ($curlerr ?: 'HTTP ' . $httpcode));
+            if (!isset($tree[$faculty][$codeSpec][$group])) {
+                $tree[$faculty][$codeSpec][$group] = [
+                    'semesters'   => [],
+                    'disciplines' => [],
+                    '_meta' => [
+                        'plan'  => $plan ?: null,
+                        'uplan' => $uplan ?: null
+                    ]
+                ];
             }
-        } else {
-            // записать свежий кеш
-            file_put_contents($cachefile, $response, LOCK_EX);
         }
-
-        $data = json_decode($response, true);
-        if (!is_array($data)) {
-            throw new \Exception('Неверный JSON от API планов');
-        }
-
-        // Маппинг полей ответа API в формат coursegenerator
-        $plans = [];
-        foreach ($data as $item) {
-            $plans[] = [
-                'fullname'    => $item['name'] ?? $item['fullname'] ?? 'Unnamed course',
-                'shortname'   => $item['code'] ?? $item['shortname'] ?? 'SC-' . substr(md5(json_encode($item)), 0, 6),
-                'categoryid'  => (int)($item['categoryid'] ?? get_config('local_autocourses', 'defaultcategory') ?: 1),
-                'numsections' => (int)($item['sections'] ?? 5),
-                'summary'     => $item['summary'] ?? ''
-            ];
-        }
-
-        return $plans;
+        return $tree;
     }
 
-    /**
-     * Вернуть кешированные планы для группы, если нужно
-     *
-     * @param string $group
-     * @return array
-     */
-    public static function get_cached_plans_for_group(string $group): array {
-        $cachedir = __DIR__ . '/../cache';
-        $safegroup = preg_replace('/[^a-zA-Z0-9_\-]/u', '_', $group);
-        $cachefile = $cachedir . "/group_{$safegroup}.json";
+    public static function attach_disciplines(array $tree): array {
+        foreach ($tree as $faculty => &$codespecs) {
+            foreach ($codespecs as $codespec => &$groups) {
+                foreach ($groups as $group => &$info) {
+                    $semesters = self::fetch_disciplines_by_group($group);
+                    $info['semesters'] = [];
 
-        if (!file_exists($cachefile)) {
+                    foreach ($semesters as $sem) {
+                        $semnum = $sem['semester'] ?? '?';
+                        $count  = is_array($sem['disciplines']) ? count($sem['disciplines']) : 0;
+                        debugging("📘 Группа {$group}, семестр {$semnum}: дисциплин {$count}", DEBUG_DEVELOPER);
+
+                        if (!empty($sem['semester']) && !empty($sem['disciplines']) && is_array($sem['disciplines'])) {
+                            $info['semesters'][$sem['semester']] = $sem['disciplines'];
+                        } else {
+                            debugging("⚠️ Пропущен семестр {$semnum} для группы {$group} — нет дисциплин или неверный формат", DEBUG_DEVELOPER);
+                        }
+                    }
+
+                    debugging("✅ Группа {$group} → семестров: " . count($info['semesters']), DEBUG_DEVELOPER);
+                }
+            }
+        }
+        return $tree;
+    }
+
+   protected static function fetch_disciplines_by_group(string $group): array {
+        global $CFG;
+        require_once($CFG->libdir . '/filelib.php');
+
+        $url = 'http://localhost:32123/education-plans/moodle-disciplines?group=' . urlencode($group);
+
+        $curl = new \curl();
+        $response = $curl->get($url, [], ['CURLOPT_RETURNTRANSFER' => true]);
+
+        if ($response === false || empty($response)) {
+            debugging("API вернул пустой ответ для группы {$group}", DEBUG_DEVELOPER);
             return [];
         }
 
-        $content = file_get_contents($cachefile);
-        $data = json_decode($content, true);
-        if (!is_array($data)) {
+        $data = json_decode($response, true);
+        debugging("RAW response for {$group}: " . substr($response, 0, 300), DEBUG_DEVELOPER);
+        debugging("DECODED for {$group}: " . json_encode($data, JSON_UNESCAPED_UNICODE), DEBUG_DEVELOPER);
+        
+        if (!isset($data['data']) || !is_array($data['data'])) {
+            debugging("Нет ключа 'data' в ответе API для группы {$group}", DEBUG_DEVELOPER);
             return [];
         }
 
-        $plans = [];
-        foreach ($data as $item) {
-            $plans[] = [
-                'fullname'    => $item['name'] ?? $item['fullname'] ?? 'Unnamed course',
-                'shortname'   => $item['code'] ?? $item['shortname'] ?? 'SC-' . substr(md5(json_encode($item)), 0, 6),
-                'categoryid'  => (int)($item['categoryid'] ?? get_config('local_autocourses', 'defaultcategory') ?: 1),
-                'numsections' => (int)($item['sections'] ?? 5),
-                'summary'     => $item['summary'] ?? ''
-            ];
-        }
-
-        return $plans;
-    }
-
-    /**
-     * Получить список всех специальностей из API (с кешированием)
-     *
-     * @return array массив записей специальностей
-     * @throws \Exception
-     */
-    public static function fetch_all_specialties(): array {
-        $baseurl = get_config('local_autocourses', 'api_specialties_url') ?: 'http://localhost:32123/specialties/all';
-        $cachedir = __DIR__ . '/../cache';
-        if (!is_dir($cachedir) && !mkdir($cachedir, 0755, true) && !is_dir($cachedir)) {
-            throw new \Exception('Не удалось создать каталог кеша: ' . $cachedir);
-        }
-        $cachefile = $cachedir . '/specialties_all.json';
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $baseurl);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-        $response = curl_exec($ch);
-        $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $err = curl_errno($ch) ? curl_error($ch) : '';
-        curl_close($ch);
-
-        if ($response === false || $http < 200 || $http >= 300) {
-            if (file_exists($cachefile)) {
-                $response = file_get_contents($cachefile);
+        $result = [];
+        foreach ($data['data'] as $entry) {
+            if (!empty($entry['semester']) && !empty($entry['disciplines']) && is_array($entry['disciplines'])) {
+                $result[] = [
+                    'semester'   => (int)$entry['semester'],
+                    'disciplines'=> $entry['disciplines']
+                ];
             } else {
-                throw new \Exception('Ошибка получения списка специальностей: ' . ($err ?: 'HTTP ' . $http));
+                debugging("⚠️ Пропущен семестр без дисциплин или с некорректной структурой: " . json_encode($entry, JSON_UNESCAPED_UNICODE), DEBUG_DEVELOPER);
             }
-        } else {
-            file_put_contents($cachefile, $response, LOCK_EX);
         }
 
-        $data = json_decode($response, true);
-        if (!is_array($data)) {
-            throw new \Exception('Неверный JSON от specialties API');
-        }
-
-        return $data;
-    }
-
-        /**
-     * Извлечь из массива записей специальностей все уникальные grp-значения.
-     *
-     * @param array $specialties
-     * @return array массив строк grp (не нормализованных)
-     */
-    public static function extract_raw_groups_from_specialties(array $specialties): array {
-        $groups = [];
-        foreach ($specialties as $rec) {
-            $cand = null;
-            foreach (['grp','group','group_name','grp_code','grpname'] as $k) {
-                if (!empty($rec[$k])) { $cand = $rec[$k]; break; }
-            }
-            if ($cand === null) { continue; }
-            if (is_array($cand)) { $cand = implode(' ', $cand); }
-            $cand = trim((string)$cand);
-            if ($cand === '') { continue; }
-            $groups[] = $cand;
-        }
-        $uniq = array_values(array_unique($groups));
-        return $uniq;
-    }
-
-        /**
-     * Нормализация grp в форму "{yearprefix}-{GRP}", очистка лишних символов.
-     *
-     * @param string $raw
-     * @param string $yearprefix
-     * @return string|null возвращает null если не удалось нормализовать
-     */
-    public static function normalize_group(string $raw, string $yearprefix = ''): ?string {
-        if ($yearprefix === '') {
-            $yearprefix = get_config('local_autocourses','default_yearprefix') ?: '25';
-        }
-        $raw = trim($raw);
-        if ($raw === '') { return null; }
-        // убрать разделители и лишние символы, сохранить кириллицу/латиницу/цифры и дефис
-        $raw = preg_replace('/[;\/,]+/', ' ', $raw);
-        $raw = preg_replace('/[^\p{Cyrillic}\p{Latin}0-9\s\-]/u', '', $raw);
-        $raw = preg_replace('/\s+/', ' ', $raw);
-        $raw = mb_strtoupper($raw, 'UTF-8');
-        if ($raw === '') { return null; }
-        return $yearprefix . '-' . $raw;
-    }
-
-    /**
-     * Удобный метод: получить нормализованные уникальные группы напрямую из API.
-     *
-     * @param string $yearprefix
-     * @return array массив нормализованных групп, например ['25-ИВТ','25-ЮР']
-     */
-    public static function fetch_groups_from_specialties(string $yearprefix = ''): array {
-        $specialties = self::fetch_all_specialties();
-        $raw = self::extract_raw_groups_from_specialties($specialties);
-        $out = [];
-        foreach ($raw as $r) {
-            $n = self::normalize_group($r, $yearprefix);
-            if ($n !== null) { $out[] = $n; }
-        }
-        return array_values(array_unique($out));
+        return $result;
     }
 
 }
