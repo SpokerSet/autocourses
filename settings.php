@@ -4,6 +4,7 @@ defined('MOODLE_INTERNAL') || die();
 if ($hassiteconfig) {
     $settings = new admin_settingpage('local_autocourses', get_string('pluginname', 'local_autocourses'));
 
+
     $ADMIN->add('localplugins', $settings);
     $ADMIN->add('localplugins', new admin_externalpage(
         'local_autocourses_fullimport',
@@ -20,5 +21,4 @@ if ($hassiteconfig) {
         'Dry‑run: структура курсов',
         $CFG->wwwroot.'/local/autocourses/dryrun.php'
     ));
-
 }
