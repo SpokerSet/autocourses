@@ -132,7 +132,7 @@ echo "</form>";
 echo "<form method='get' action='{$CFG->wwwroot}/local/autocourses/dryrun.php' style='margin-top:20px;'>";
 echo "<h3>Dry‑run: структура курсов</h3>";
 echo "<label>Учебный год: <input type='text' name='year' value='2025-2026' style='width:200px;'></label><br><br>";
-echo "<input type='submit' value='Показать статистику'>";
+echo "<input type='submit' value='Показать dry-run'>";
 echo "</form>";
 
 
