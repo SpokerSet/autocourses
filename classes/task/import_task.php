@@ -4,7 +4,7 @@ namespace local_autocourses\task;
 defined('MOODLE_INTERNAL') || die();
 require_once($CFG->dirroot . '/local/autocourses/classes/coursegenerator.php');
 
-class import_task extends \core\task\adhoc_task {
+class import_task extends \core\task\scheduled_task {
 
     public function get_name(): string {
         return get_string('task_import_plans', 'local_autocourses');
