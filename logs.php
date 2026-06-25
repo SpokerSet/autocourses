@@ -1,90 +1,60 @@
 <?php
-// 1. Включаем отображение ошибок на самый максимум
-// @ini_set('display_errors', '1');
-// @ini_set('display_startup_errors', '1');
-// @error_reporting(E_ALL);
+// local/autocourses/logs.php
 
-// 2. Абсолютно надежный поиск и подключение config.php без использования DIR
-$dir = dirname(__FILE__);
-while ($dir !== '/' && $dir !== '\\' && !file_exists($dir . '/config.php')) {
-    $dir = dirname($dir);
-}
+require_once('../../config.php');
+require_once($CFG->libdir.'/adminlib.php');
 
-if (file_exists($dir . '/config.php')) {
-    require_once($dir . '/config.php');
-} else {
-    die("Критическая ошибка: Не удалось динамически найти файл config.php в корне СДО Moodle.");
-}
+// 1. Проверка прав (администратор)
+require_login();
+admin_externalpage_setup('local_autocourses_logs'); // ← берёт настройки из settings.php
 
-// 3. Инициализация глобальных объектов Moodle
-global $DB, $PAGE, $OUTPUT, $USER;
-
-// 4. Жесткая проверка авторизации
-try {
-    require_login();
-    if (!is_siteadmin()) {
-        die('Доступ к журналу логов разрешен только администраторам сайта.');
-    }
-} catch (\Throwable $e) {
-    die("Ошибка сессии Moodle: " . $e->getMessage());
-}
-
-// 5. Базовые параметры пагинации
-$page = optional_param('page', 0, PARAM_INT);
-$perpage = 50;
-
-// 6. Конфигурация контекста отображения страницы
-$PAGE->set_url(new \moodle_url('/local/autocourses/logs.php'));
-$PAGE->set_context(\context_system::instance());
-$PAGE->set_title('Журнал аудита Autocourses');
-$PAGE->set_heading('Журнал аудита Autocourses');
+// 2. Заголовки
+$PAGE->set_title('Логи автокурсов');
+$PAGE->set_heading('Логи автокурсов');
 
 echo $OUTPUT->header();
-echo $OUTPUT->heading('Журнал аудита событий системы');
 
-// 7. Построение объектной таблицы
-$table = new \html_table();
-$table->head = ['Дата', 'Уровень', 'Действие', 'Сообщение', 'Инициатор'];
-$table->attributes['class'] = 'generaltable logtable m-y-1';
-
+// 3. Вывод логов
 try {
-    // Проверяем физическое существование таблицы в базе данных
-    if ($DB->get_manager()->table_exists('local_autocourses_logs')) {
-        $totalcount = $DB->count_records('local_autocourses_logs');
-        $logs = $DB->get_records('local_autocourses_logs', null, 'id DESC', '*', $page * $perpage, $perpage);
-
-        if (!empty($logs)) {
-            foreach ($logs as $log) {
-                // Определение имени инициатора
-                $username = 'Система (Cron)';
-                if (!empty($log->userid)) {
-                    $user = $DB->get_record('user', ['id' => $log->userid], 'firstname, lastname');
-                    $username = $user ? fullname($user) : 'Удаленный пользователь';
-                }
-                
-                // Цветовая стилизация уровней логов (Bootstrap Badges)
-                $badge = 'badge-info';
-                if ($log->loglevel === 'ERROR') { $badge = 'badge-danger'; }
-                if ($log->loglevel === 'WARNING') { $badge = 'badge-warning'; }
-                
-                $table->data[] = [
-                    userdate($log->timecreated, '%d.%m.%Y %H:%M:%S'),
-                    \html_writer::span($log->loglevel, 'badge ' . $badge),
-                    s($log->action),
-                    s($log->message),
-                    $username
-                ];
-            }
-            echo \html_writer::table($table);
-            echo $OUTPUT->paging_bar($totalcount, $page, $perpage, $PAGE->url);
-        } else {
-            echo $OUTPUT->notification('Таблица логов пуста. События еще не фиксировались.', 'info');
-        }
-    } else {
-        echo $OUTPUT->notification('Таблица local_autocourses_logs не найдена в текущей БД. Перейдите в раздел "Администрирование", чтобы Moodle создал её структуру автоматически.', 'warning');
-    }
-} catch (\Throwable $e) {
-    echo $OUTPUT->notification('Ошибка выполнения SQL-запроса: ' . $e->getMessage(), 'error');
+    $logs = $DB->get_records('local_autocourses_logs', null, 'timecreated DESC', '*', 0, 100);
+} catch (dml_exception $e) {
+    echo \html_writer::tag('div', 'Ошибка чтения логов: ' . $e->getMessage(), ['class' => 'alert alert-danger']);
+    $logs = [];
 }
+
+if ($logs) {
+    $table = new \html_table();
+    $table->head = ['Время', 'Пользователь', 'Действие', 'Уровень', 'Сообщение', 'Контекст'];
+    $table->data = [];
+
+    foreach ($logs as $log) {
+        $user = \core_user::get_user($log->userid);
+        $username = $user ? fullname($user) : 'Система';
+
+        // Обработка контекста (может быть JSON)
+        $context = $log->contextdata ? htmlspecialchars($log->contextdata, ENT_QUOTES, 'UTF-8') : '';
+
+        $table->data[] = [
+            userdate($log->timecreated, get_string('strftimedatetime', 'core_langconfig')),
+            $username,
+            s($log->action),
+            $log->loglevel,
+            s($log->message),
+            $context
+        ];
+    }
+
+    echo \html_writer::table($table);
+    echo \html_writer::tag('p', "Показаны последние $limit записей.");
+} else {
+    echo \html_writer::tag('p', 'Логи отсутствуют.');
+}
+
+// 4. Кнопка "Назад" (необязательно)
+echo \html_writer::link(
+    new \moodle_url('/local/autocourses/index.php'),
+    '← На главную',
+    ['class' => 'btn btn-secondary']
+);
 
 echo $OUTPUT->footer();

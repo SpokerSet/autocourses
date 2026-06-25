@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="local/autocourses/db" VERSION="20240301" COMMENT="Local plugin autocourses">
+  <TABLES>
+    <TABLE NAME="local_autocourses_logs" COMMENT="Logs for autocourses plugin">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="action" TYPE="char" LENGTH="100" NOTNULL="true"/>
+        <FIELD NAME="loglevel" TYPE="char" LENGTH="20" NOTNULL="true" DEFAULT="INFO"/>
+        <FIELD NAME="message" TYPE="text" NOTNULL="true"/>
+        <FIELD NAME="contextdata" TYPE="text" NOTNULL="false"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+        <KEY NAME="userid" TYPE="foreign" FIELDS="userid" REFTABLE="user" REFFIELDS="id"/>
+        <KEY NAME="timecreated" TYPE="index" FIELDS="timecreated"/>
+        <KEY NAME="action_level" TYPE="index" FIELDS="action, loglevel"/>
+      </KEYS>
+    </TABLE>
+  </TABLES>
+</XMLDB>

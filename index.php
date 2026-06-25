@@ -14,6 +14,13 @@ $PAGE->set_heading('Управление курсами');
 echo $OUTPUT->header();
 echo $OUTPUT->heading('Операции с курсами');
 
+\local_autocourses\log\logger::write(
+    'TEST',
+    'Первая тестовая запись',
+    \local_autocourses\log\logger::LEVEL_INFO,
+    ['test' => 'OK']
+);
+
 // === Удаление по дисциплине ===
 if (!empty($_POST['purge']) && !empty($_POST['pattern'])) {
     $pattern = trim($_POST['pattern']);
@@ -137,52 +144,61 @@ echo "</form>";
 
 
 // === Отчёт по заполненности курсов ===
-echo $OUTPUT->heading('Статистика заполненности курсов');
+// ----- Отчёт по заполненности курсов (только для администраторов) -----
+if (has_capability('moodle/site:config', \context_system::instance())) {
 
-if ($DB->get_manager()->table_exists('local_autocourses_fillstats')) {
-    $courses = $DB->get_records('local_autocourses_fillstats', null, 'percent DESC');
+    echo $OUTPUT->heading('Заполненность курсов', 3);
 
-    $table = new \html_table();
-    $table->head = ['ID курса', 'Название', 'Элементов', 'Заполненность'];
+    // SQL-запрос с использованием $DB
+    $sql = "SELECT c.fullname AS coursename,
+                   COUNT(DISTINCT f.id) AS filecount,
+                   COUNT(DISTINCT cm.id) AS totalmodules,
+                   ROUND(COUNT(DISTINCT CASE WHEN f.id IS NOT NULL THEN cm.id END) / COUNT(DISTINCT cm.id) * 100) AS fillpercent
+              FROM {course} c
+         LEFT JOIN {course_modules} cm ON cm.course = c.id
+         LEFT JOIN {context} ctx ON ctx.instanceid = cm.id AND ctx.contextlevel = 70
+         LEFT JOIN {files} f ON f.contextid = ctx.id AND f.filename <> '.'
+             WHERE c.fullname <> '/ PSU'
+          GROUP BY c.id, c.fullname
+          ORDER BY fillpercent DESC
+             LIMIT 10"; // ограничим количество, чтобы не перегружать страницу
 
-    foreach ($courses as $c) {
-        $course = $DB->get_record('course', ['id' => $c->courseid], 'id, fullname');
+    $rows = $DB->get_records_sql($sql);
 
-        // Цвет прогресс-бара
-        $color = ($c->percent < 30) ? 'red' : (($c->percent < 70) ? 'orange' : 'green');
-        $bar = \html_writer::div(
-            \html_writer::div('', 'bar-fill', [
-                'style' => "width:{$c->percent}%;background-color:{$color};height:100%;"
-            ]),
-            'bar-container',
-            ['style' => 'width:150px;border:1px solid #ccc;height:15px;display:inline-block;margin-right:5px;']
+    if ($rows) {
+        $table = new \html_table();
+        $table->head = ['Название курса', 'Количество файлов', 'Заполненность (%)'];
+        $table->data = [];
+
+        foreach ($rows as $row) {
+            $table->data[] = [
+                s($row->coursename),
+                $row->filecount,
+                $row->fillpercent . '%'
+            ];
+        }
+
+        echo \html_writer::table($table);
+
+        // Кнопка для скачивания CSV (можно добавить позже)
+        echo \html_writer::link(
+            new \moodle_url('/local/autocourses/export_courses_csv.php'),
+            'Скачать CSV',
+            ['class' => 'btn btn-secondary']
         );
 
-        $row = [
-            $course->id,
-            format_string($course->fullname),
-            $c->total,
-            $bar . " {$c->percent}%"
-        ];
-        $table->data[] = $row;
+    } else {
+        echo \html_writer::tag('p', 'Нет данных для отображения.');
     }
-
-    echo \html_writer::table($table);
-
-    // Сводная статистика
-    $low = $DB->count_records_select('local_autocourses_fillstats', 'percent < 30');
-    $mid = $DB->count_records_select('local_autocourses_fillstats', 'percent >= 30 AND percent < 70');
-    $high = $DB->count_records_select('local_autocourses_fillstats', 'percent >= 70');
-
-    echo \html_writer::tag('h3', 'Распределение курсов по заполненности');
-    echo \html_writer::tag('p', "Менее 30%: {$low} курсов");
-    echo \html_writer::tag('p', "30–70%: {$mid} курсов");
-    echo \html_writer::tag('p', "Более 70%: {$high} курсов");
-
-} else {
-    echo $OUTPUT->notification('Таблица статистики не найдена. Запустите cron для пересчёта.', 'notifyproblem');
 }
 
+echo \html_writer::link(
+    new \moodle_url('/local/autocourses/logs.php'),
+    '📋 Просмотр логов',
+    ['class' => 'btn btn-primary']
+);
 
 
 echo $OUTPUT->footer();
+
+

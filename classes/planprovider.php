@@ -60,6 +60,13 @@ class planprovider {
         global $CFG;
         require_once($CFG->libdir . '/filelib.php');
 
+        \local_autocourses\log\logger::write(
+            'API_REQUEST',
+            "Запрос к API для группы: {$group}",
+            \local_autocourses\log\logger::LEVEL_INFO,
+            ['group' => $group]
+        );
+
         $url = 'http://localhost:32123/education-plans/moodle-disciplines?group=' . urlencode($group);
 
         $curl = new \curl();
@@ -74,6 +81,13 @@ class planprovider {
         debugging("RAW response for {$group}: " . substr($response, 0, 300), DEBUG_DEVELOPER);
         debugging("DECODED for {$group}: " . json_encode($data, JSON_UNESCAPED_UNICODE), DEBUG_DEVELOPER);
         
+        \local_autocourses\log\logger::write(
+            'API_RESPONSE',
+            "Успешно получены данные для группы {$group}",
+            \local_autocourses\log\logger::LEVEL_INFO,
+            ['group' => $group, 'response_size' => strlen($response)]
+        );
+
         if (!isset($data['data']) || !is_array($data['data'])) {
             debugging("Нет ключа 'data' в ответе API для группы {$group}", DEBUG_DEVELOPER);
             return [];

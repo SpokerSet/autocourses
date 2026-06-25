@@ -3,8 +3,6 @@ namespace local_autocourses;
 require_once(__DIR__.'/../../config.php');
 require_once($CFG->libdir.'/adminlib.php');
 require_once($CFG->dirroot.'/local/autocourses/lib.php');
-
-
 require_login();
 admin_externalpage_setup('local_autocourses_dryrun');
 
